@@ -1,99 +1,377 @@
-import { useState } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useState, useCallback, memo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
-import { Footprints, Mail, Lock, Eye, EyeOff } from 'lucide-react';
-import { Logo } from '@/components/Logo';
-
+import { 
+  Mail, 
+  Lock, 
+  User, 
+  Eye, 
+  EyeOff, 
+  Loader2, 
+  AlertCircle, 
+  CheckCircle,
+  Chrome,
+  Facebook
+} from 'lucide-react';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup } from 'firebase/auth';
 import { auth, googleProvider, facebookProvider } from '@/lib/firebase';
-import { signInWithPopup } from 'firebase/auth';
+import { Logo } from '@/components/Logo';
+import { useToast } from '@/hooks/use-toast';
+import { z } from 'zod';
+
+// Validation schemas
+const loginSchema = z.object({
+  email: z.string().email('Please enter a valid email address'),
+  password: z.string().min(6, 'Password must be at least 6 characters')
+});
+
+const registerSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters'),
+  email: z.string().email('Please enter a valid email address'),
+  password: z.string()
+    .min(8, 'Password must be at least 8 characters')
+    .regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/, 'Password must contain at least one uppercase letter, one lowercase letter, and one number'),
+  confirmPassword: z.string()
+}).refine((data) => data.password === data.confirmPassword, {
+  message: "Passwords don't match",
+  path: ["confirmPassword"]
+});
+
+interface User {
+  name: string;
+  email: string;
+}
 
 interface AuthProps {
-  onAuth: (user: { name: string; email: string }) => void;
+  onAuth: (user: User) => void;
 }
+
+interface FormData {
+  name: string;
+  email: string;
+  password: string;
+  confirmPassword: string;
+}
+
+interface ValidationErrors {
+  name?: string;
+  email?: string;
+  password?: string;
+  confirmPassword?: string;
+  general?: string;
+}
+
+// Firebase error messages mapping
+const getFirebaseErrorMessage = (errorCode: string): string => {
+  switch (errorCode) {
+    case 'auth/user-not-found':
+      return 'No account found with this email address';
+    case 'auth/wrong-password':
+      return 'Incorrect password';
+    case 'auth/email-already-in-use':
+      return 'An account with this email already exists';
+    case 'auth/weak-password':
+      return 'Password is too weak. Please choose a stronger password';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address';
+    case 'auth/too-many-requests':
+      return 'Too many failed attempts. Please try again later';
+    case 'auth/network-request-failed':
+      return 'Network error. Please check your connection and try again';
+    case 'auth/popup-closed-by-user':
+      return 'Authentication was cancelled';
+    case 'auth/popup-blocked':
+      return 'Popup was blocked. Please allow popups and try again';
+    default:
+      return 'An unexpected error occurred. Please try again';
+  }
+};
 
 const Auth = ({ onAuth }: AuthProps) => {
   const [isLogin, setIsLogin] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
-  const [formData, setFormData] = useState({
+  const [isLoading, setIsLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [isFacebookLoading, setIsFacebookLoading] = useState(false);
+  const [formData, setFormData] = useState<FormData>({
     name: '',
     email: '',
     password: '',
+    confirmPassword: ''
   });
+  const [errors, setErrors] = useState<ValidationErrors>({});
+  
+  const { toast } = useToast();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const validateForm = useCallback((data: FormData): ValidationErrors => {
+    const schema = isLogin ? loginSchema : registerSchema;
+    
+    try {
+      schema.parse(data);
+      return {};
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const fieldErrors: ValidationErrors = {};
+        error.errors.forEach((err) => {
+          if (err.path[0]) {
+            fieldErrors[err.path[0] as keyof ValidationErrors] = err.message;
+          }
+        });
+        return fieldErrors;
+      }
+      return { general: 'Validation failed' };
+    }
+  }, [isLogin]);
+
+  const handleInputChange = useCallback((field: keyof FormData, value: string) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+    
+    // Clear field-specific error when user starts typing
+    if (errors[field]) {
+      setErrors(prev => ({ ...prev, [field]: undefined }));
+    }
+  }, [errors]);
+
+  const handleEmailAuth = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
-    // Demo authentication - in real app would connect to Supabase
-    const user = {
-      name: formData.name || formData.email.split('@')[0],
-      email: formData.email,
-    };
-    onAuth(user);
-  };
+    
+    // Validate form
+    const validationErrors = validateForm(formData);
+    if (Object.keys(validationErrors).length > 0) {
+      setErrors(validationErrors);
+      return;
+    }
 
-  const handleSocialAuth = async (providerName: 'google' | 'facebook') => {
-  const provider = providerName === 'google' ? googleProvider : facebookProvider;
-  try {
-    const result = await signInWithPopup(auth, provider);
-    onAuth({
-      name: result.user.displayName ?? 'User',
-      email: result.user.email ?? '',
+    setIsLoading(true);
+    setErrors({});
+
+    try {
+      let userCredential;
+      
+      if (isLogin) {
+        userCredential = await signInWithEmailAndPassword(auth, formData.email, formData.password);
+      } else {
+        userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+      }
+
+      const user = userCredential.user;
+      const userData: User = {
+        name: formData.name || user.displayName || user.email?.split('@')[0] || 'User',
+        email: user.email || formData.email
+      };
+
+      toast({
+        title: isLogin ? "Welcome back!" : "Account created!",
+        description: `Successfully ${isLogin ? 'signed in' : 'registered'} as ${userData.name}`,
+        duration: 3000,
+      });
+
+      onAuth(userData);
+    } catch (error: any) {
+      const errorMessage = getFirebaseErrorMessage(error.code);
+      setErrors({ general: errorMessage });
+      
+      toast({
+        variant: "destructive",
+        title: "Authentication failed",
+        description: errorMessage,
+        duration: 5000,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [formData, isLogin, validateForm, onAuth, toast]);
+
+  const handleSocialAuth = useCallback(async (provider: 'google' | 'facebook') => {
+    const setLoading = provider === 'google' ? setIsGoogleLoading : setIsFacebookLoading;
+    const authProvider = provider === 'google' ? googleProvider : facebookProvider;
+    
+    setLoading(true);
+    setErrors({});
+
+    try {
+      const result = await signInWithPopup(auth, authProvider);
+      const user = result.user;
+      
+      const userData: User = {
+        name: user.displayName || user.email?.split('@')[0] || 'User',
+        email: user.email || ''
+      };
+
+      toast({
+        title: "Welcome!",
+        description: `Successfully signed in with ${provider === 'google' ? 'Google' : 'Facebook'}`,
+        duration: 3000,
+      });
+
+      onAuth(userData);
+    } catch (error: any) {
+      const errorMessage = getFirebaseErrorMessage(error.code);
+      setErrors({ general: errorMessage });
+      
+      toast({
+        variant: "destructive",
+        title: "Authentication failed",
+        description: errorMessage,
+        duration: 5000,
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [onAuth, toast]);
+
+  const toggleAuthMode = useCallback(() => {
+    setIsLogin(prev => !prev);
+    setErrors({});
+    setFormData({
+      name: '',
+      email: '',
+      password: '',
+      confirmPassword: ''
     });
-  } catch (err) {
-    console.error(err);
-    alert('Login failed – please try again.');
-  }
-};
+  }, []);
+
+  const togglePasswordVisibility = useCallback(() => {
+    setShowPassword(prev => !prev);
+  }, []);
+
+  const isFormValid = useCallback(() => {
+    const validationErrors = validateForm(formData);
+    return Object.keys(validationErrors).length === 0;
+  }, [formData, validateForm]);
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <div className="w-full max-w-md space-y-6">
-        {/* Logo */}
+        {/* Logo and Header */}
         <div className="text-center space-y-4">
-          <div className="w-16 h-16 bg-gradient-to-br from-primary to-primary-light rounded-full flex items-center justify-center mx-auto">
-            <Logo className="h-16 w-16 text-accent" />
+          <div className="flex justify-center">
+            <Logo />
           </div>
           <div>
-            <h1 className="text-3xl font-bold text-foreground">ბოლთა</h1>
-            <p className="text-muted-foreground">იარე. მოიპოვე. გადაცვალე.</p>
+            <h1 className="text-2xl font-bold text-foreground">
+              {isLogin ? 'Welcome Back' : 'Join Bolta'}
+            </h1>
+            <p className="text-muted-foreground">
+              {isLogin 
+                ? 'Sign in to continue your fitness journey' 
+                : 'Start earning coins for every step you take'
+              }
+            </p>
           </div>
         </div>
 
-        {/* Auth Form */}
-        <Card className="border-0 shadow-soft">
-          <CardHeader className="text-center">
-            <CardTitle className="text-foreground">
-              {isLogin ? 'Welcome Back' : 'Start Your Journey'}
+        {/* Benefits Badge */}
+        {!isLogin && (
+          <div className="bg-gradient-to-r from-primary/10 to-accent/10 rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <CheckCircle className="h-4 w-4 text-green-600" />
+              <span className="text-sm font-medium">What you'll get:</span>
+            </div>
+            <ul className="text-xs text-muted-foreground space-y-1">
+              <li>• Earn 1 Boltacoin per 1,000 steps</li>
+              <li>• Exchange coins for healthy store discounts</li>
+              <li>• Track daily and weekly progress</li>
+              <li>• Unlock achievements and rewards</li>
+            </ul>
+          </div>
+        )}
+
+        {/* Main Auth Card */}
+        <Card className="border-0 shadow-lg">
+          <CardHeader className="space-y-1">
+            <CardTitle className="text-center">
+              {isLogin ? 'Sign In' : 'Create Account'}
             </CardTitle>
-            <CardDescription>
-              {isLogin 
-                ? 'Sign in to continue' 
-                : 'Create your account and start walking'
-              }
-            </CardDescription>
           </CardHeader>
-          
           <CardContent className="space-y-4">
-            <form onSubmit={handleSubmit} className="space-y-4">
+            {/* General Error */}
+            {errors.general && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{errors.general}</AlertDescription>
+              </Alert>
+            )}
+
+            {/* Social Auth Buttons */}
+            <div className="space-y-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={() => handleSocialAuth('google')}
+                disabled={isGoogleLoading || isLoading}
+              >
+                {isGoogleLoading ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Chrome className="mr-2 h-4 w-4" />
+                )}
+                Continue with Google
+              </Button>
+              
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={() => handleSocialAuth('facebook')}
+                disabled={isFacebookLoading || isLoading}
+              >
+                {isFacebookLoading ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Facebook className="mr-2 h-4 w-4" />
+                )}
+                Continue with Facebook
+              </Button>
+            </div>
+
+            <div className="relative">
+              <Separator />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <span className="bg-background px-2 text-xs text-muted-foreground">
+                  Or continue with email
+                </span>
+              </div>
+            </div>
+
+            {/* Email Form */}
+            <form onSubmit={handleEmailAuth} className="space-y-4">
+              {/* Name Field (Register only) */}
               {!isLogin && (
                 <div className="space-y-2">
-                  <Label htmlFor="name" className="text-foreground">Full Name</Label>
-                  <Input
-                    id="name"
-                    type="text"
-                    placeholder="Enter your full name"
-                    value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className="bg-input border-border text-foreground"
-                    required={!isLogin}
-                  />
+                  <Label htmlFor="name" className="text-sm font-medium">
+                    Full Name
+                  </Label>
+                  <div className="relative">
+                    <User className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      id="name"
+                      type="text"
+                      placeholder="Enter your full name"
+                      value={formData.name}
+                      onChange={(e) => handleInputChange('name', e.target.value)}
+                      className={`pl-10 ${errors.name ? 'border-destructive' : ''}`}
+                      disabled={isLoading}
+                      autoComplete="name"
+                    />
+                  </div>
+                  {errors.name && (
+                    <p className="text-xs text-destructive">{errors.name}</p>
+                  )}
                 </div>
               )}
-              
+
+              {/* Email Field */}
               <div className="space-y-2">
-                <Label htmlFor="email" className="text-foreground">Email</Label>
+                <Label htmlFor="email" className="text-sm font-medium">
+                  Email Address
+                </Label>
                 <div className="relative">
                   <Mail className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                   <Input
@@ -101,90 +379,124 @@ const Auth = ({ onAuth }: AuthProps) => {
                     type="email"
                     placeholder="Enter your email"
                     value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                    className="pl-10 bg-input border-border text-foreground"
-                    required
+                    onChange={(e) => handleInputChange('email', e.target.value)}
+                    className={`pl-10 ${errors.email ? 'border-destructive' : ''}`}
+                    disabled={isLoading}
+                    autoComplete="email"
                   />
                 </div>
+                {errors.email && (
+                  <p className="text-xs text-destructive">{errors.email}</p>
+                )}
               </div>
-              
+
+              {/* Password Field */}
               <div className="space-y-2">
-                <Label htmlFor="password" className="text-foreground">Password</Label>
+                <Label htmlFor="password" className="text-sm font-medium">
+                  Password
+                </Label>
                 <div className="relative">
                   <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                   <Input
                     id="password"
                     type={showPassword ? 'text' : 'password'}
-                    placeholder="Enter your password"
+                    placeholder={isLogin ? 'Enter your password' : 'Create a strong password'}
                     value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    className="pl-10 pr-10 bg-input border-border text-foreground"
-                    required
+                    onChange={(e) => handleInputChange('password', e.target.value)}
+                    className={`pl-10 pr-10 ${errors.password ? 'border-destructive' : ''}`}
+                    disabled={isLoading}
+                    autoComplete={isLogin ? 'current-password' : 'new-password'}
                   />
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="absolute right-0 top-0 h-full px-3 text-muted-foreground hover:text-foreground"
-                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-0 top-0 h-full px-3 py-2 hover:bg-transparent"
+                    onClick={togglePasswordVisibility}
+                    disabled={isLoading}
                   >
-                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    {showPassword ? (
+                      <EyeOff className="h-4 w-4 text-muted-foreground" />
+                    ) : (
+                      <Eye className="h-4 w-4 text-muted-foreground" />
+                    )}
                   </Button>
                 </div>
+                {errors.password && (
+                  <p className="text-xs text-destructive">{errors.password}</p>
+                )}
               </div>
-              
-              <Button type="submit" className="w-full bg-primary hover:bg-primary-dark text-primary-foreground">
-                {isLogin ? 'Sign In' : 'Create Account'}
+
+              {/* Confirm Password Field (Register only) */}
+              {!isLogin && (
+                <div className="space-y-2">
+                  <Label htmlFor="confirmPassword" className="text-sm font-medium">
+                    Confirm Password
+                  </Label>
+                  <div className="relative">
+                    <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      id="confirmPassword"
+                      type={showPassword ? 'text' : 'password'}
+                      placeholder="Confirm your password"
+                      value={formData.confirmPassword}
+                      onChange={(e) => handleInputChange('confirmPassword', e.target.value)}
+                      className={`pl-10 ${errors.confirmPassword ? 'border-destructive' : ''}`}
+                      disabled={isLoading}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  {errors.confirmPassword && (
+                    <p className="text-xs text-destructive">{errors.confirmPassword}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Submit Button */}
+              <Button
+                type="submit"
+                className="w-full"
+                disabled={isLoading || !isFormValid()}
+              >
+                {isLoading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    {isLogin ? 'Signing In...' : 'Creating Account...'}
+                  </>
+                ) : (
+                  isLogin ? 'Sign In' : 'Create Account'
+                )}
               </Button>
             </form>
 
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <Separator className="w-full" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-card px-2 text-muted-foreground">or continue with</span>
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              <Button 
-                type="button"
-                variant="outline" 
-                className="w-full bg-white text-gray-900 border-gray-300 hover:bg-gray-50"
-                onClick={() => handleSocialAuth('google')}
-              >
-                <svg xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 48 48"
-                width="48px"
-                height="48px">
-                  <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z"/>
-                  <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z"/>
-                  <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.619-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z"/>
-                  <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z"/>
-                  </svg>
-                Continue with Google
-              </Button>
-            </div>
-
+            {/* Toggle Auth Mode */}
             <div className="text-center">
+              <p className="text-sm text-muted-foreground">
+                {isLogin ? "Don't have an account?" : 'Already have an account?'}
+              </p>
               <Button
                 type="button"
-                variant="link"
-                className="text-muted-foreground hover:text-foreground"
-                onClick={() => setIsLogin(!isLogin)}
+                variant="ghost"
+                className="mt-1 p-0 h-auto text-primary hover:text-primary-dark"
+                onClick={toggleAuthMode}
+                disabled={isLoading}
               >
-                {isLogin 
-                  ? "Don't have an account? Sign up" 
-                  : "Already have an account? Sign in"
-                }
+                {isLogin ? 'Sign up here' : 'Sign in here'}
               </Button>
             </div>
           </CardContent>
         </Card>
+
+        {/* Terms and Privacy */}
+        <div className="text-center text-xs text-muted-foreground">
+          By continuing, you agree to our{' '}
+          <a href="#" className="text-primary hover:underline">Terms of Service</a>{' '}
+          and{' '}
+          <a href="#" className="text-primary hover:underline">Privacy Policy</a>
+        </div>
       </div>
     </div>
   );
 };
 
-export default Auth;
+export default memo(Auth);

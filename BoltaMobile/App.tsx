@@ -1,10 +1,12 @@
+import React from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { Text, View, StyleSheet } from 'react-native';
 
 export default function App() {
   return (
     <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
+      <Text style={styles.title}>Bolta Mobile</Text>
+      <Text style={styles.subtitle}>Fitness Tracker - Coming Soon!</Text>
       <StatusBar style="auto" />
     </View>
   );
@@ -13,8 +15,18 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: '#3B82F6',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  title: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: 'white',
+    marginBottom: 8,
+  },
+  subtitle: {
+    fontSize: 18,
+    color: 'rgba(255, 255, 255, 0.9)',
   },
 });

@@ -39,13 +39,14 @@ export const useStepCounter = (): UseStepCounterReturn => {
   const [error, setError] = useState<string | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
   
+  const lastStepCount = useRef(0);
   const lastMotionTime = useRef(0);
   const motionBuffer = useRef<SensorData[]>([]);
   const subscription = useRef<any>(null);
 
   // Utility functions
   const calculateDistance = useCallback((steps: number): number => {
-    return Math.round((steps * STEP_LENGTH_METERS) / 1000 * 100) / 100;
+    return Math.round((steps * STEP_LENGTH_METERS) / 1000 * 100) / 100; // km with 2 decimal places
   }, []);
 
   const calculateCoins = useCallback((steps: number): number => {
@@ -53,7 +54,7 @@ export const useStepCounter = (): UseStepCounterReturn => {
   }, []);
 
   const calculateCalories = useCallback((steps: number): number => {
-    return Math.round(steps * CALORIES_PER_STEP);
+    return Math.round(steps * CALORIES_PER_STEP * 100) / 100;
   }, []);
 
   // Load persisted data
@@ -62,6 +63,7 @@ export const useStepCounter = (): UseStepCounterReturn => {
       const stored = await AsyncStorage.getItem(STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
+        // Check if data is from today
         const storedDate = new Date(parsed.lastUpdated);
         const today = new Date();
         
@@ -111,6 +113,7 @@ export const useStepCounter = (): UseStepCounterReturn => {
   // Step detection algorithm
   const detectStep = useCallback((sensorData: SensorData) => {
     const { x, y, z, timestamp } = sensorData;
+    const magnitude = Math.sqrt(x * x + y * y + z * z);
     
     // Add to motion buffer
     motionBuffer.current.push({ x, y, z, timestamp });
@@ -145,6 +148,7 @@ export const useStepCounter = (): UseStepCounterReturn => {
     try {
       setError(null);
       
+      // Request motion sensor permission
       const motionPermission = await DeviceMotion.requestPermissionsAsync();
       if (!motionPermission.granted) {
         throw new Error('Motion sensor permission denied');
@@ -168,13 +172,16 @@ export const useStepCounter = (): UseStepCounterReturn => {
     try {
       setError(null);
       
+      // Check if DeviceMotion is available
       const isAvailable = await DeviceMotion.isAvailableAsync();
       if (!isAvailable) {
         throw new Error('Device motion sensor not available');
       }
 
+      // Set update interval (100ms = 10Hz)
       DeviceMotion.setUpdateInterval(100);
 
+      // Start listening to motion events
       subscription.current = DeviceMotion.addListener((motionData) => {
         if (motionData && motionData.acceleration) {
           const sensorData: SensorData = {
@@ -223,11 +230,13 @@ export const useStepCounter = (): UseStepCounterReturn => {
   useEffect(() => {
     const initialize = async () => {
       try {
+        // Load persisted data
         const persistedData = await loadPersistedData();
         if (persistedData) {
           setStepData(persistedData);
         }
 
+        // Check permissions
         const motionPermission = await DeviceMotion.getPermissionsAsync();
         setPermissionGranted(motionPermission.granted);
 
@@ -248,6 +257,21 @@ export const useStepCounter = (): UseStepCounterReturn => {
       stopTracking();
     };
   }, [stopTracking]);
+
+  // Auto-reset at midnight
+  useEffect(() => {
+    const checkMidnight = () => {
+      const now = new Date();
+      const lastUpdate = new Date(stepData.lastUpdated);
+      
+      if (now.toDateString() !== lastUpdate.toDateString()) {
+        resetDaily();
+      }
+    };
+
+    const interval = setInterval(checkMidnight, 60000); // Check every minute
+    return () => clearInterval(interval);
+  }, [stepData.lastUpdated, resetDaily]);
 
   return {
     stepData,

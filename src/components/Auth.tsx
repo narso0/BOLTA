@@ -19,7 +19,7 @@ import {
   Facebook
 } from 'lucide-react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup } from 'firebase/auth';
-import { auth, googleProvider, facebookProvider } from '@/lib/firebase';
+import { auth, googleProvider, facebookProvider, getAuthErrorMessage } from '@/lib/firebase';
 import { Logo } from '@/components/Logo';
 import { useToast } from '@/hooks/use-toast';
 import { z } from 'zod';
@@ -66,31 +66,7 @@ interface ValidationErrors {
   general?: string;
 }
 
-// Firebase error messages mapping
-const getFirebaseErrorMessage = (errorCode: string): string => {
-  switch (errorCode) {
-    case 'auth/user-not-found':
-      return 'No account found with this email address';
-    case 'auth/wrong-password':
-      return 'Incorrect password';
-    case 'auth/email-already-in-use':
-      return 'An account with this email already exists';
-    case 'auth/weak-password':
-      return 'Password is too weak. Please choose a stronger password';
-    case 'auth/invalid-email':
-      return 'Please enter a valid email address';
-    case 'auth/too-many-requests':
-      return 'Too many failed attempts. Please try again later';
-    case 'auth/network-request-failed':
-      return 'Network error. Please check your connection and try again';
-    case 'auth/popup-closed-by-user':
-      return 'Authentication was cancelled';
-    case 'auth/popup-blocked':
-      return 'Popup was blocked. Please allow popups and try again';
-    default:
-      return 'An unexpected error occurred. Please try again';
-  }
-};
+// Using getAuthErrorMessage from Firebase lib
 
 const Auth = ({ onAuth }: AuthProps) => {
   const [isLogin, setIsLogin] = useState(true);
@@ -173,7 +149,7 @@ const Auth = ({ onAuth }: AuthProps) => {
 
       onAuth(userData);
     } catch (error: any) {
-      const errorMessage = getFirebaseErrorMessage(error.code);
+      const errorMessage = getAuthErrorMessage(error.code);
       setErrors({ general: errorMessage });
       
       toast({
@@ -211,7 +187,7 @@ const Auth = ({ onAuth }: AuthProps) => {
 
       onAuth(userData);
     } catch (error: any) {
-      const errorMessage = getFirebaseErrorMessage(error.code);
+      const errorMessage = getAuthErrorMessage(error.code);
       setErrors({ general: errorMessage });
       
       toast({

@@ -113,18 +113,21 @@ try {
     
     if (useEmulators) {
       try {
-        // Connect Auth emulator
-        if (!auth.config.emulator) {
+        // Connect Auth emulator - check if already connected
+        const authConfig = auth.config as any;
+        if (!authConfig.emulator) {
           connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
         }
         
-        // Connect Firestore emulator
-        if (!db._delegate._databaseId.host.includes('localhost')) {
+        // Connect Firestore emulator - check if already connected
+        const firestoreSettings = (db as any)._delegate?._databaseId;
+        if (firestoreSettings && !firestoreSettings.host.includes('localhost')) {
           connectFirestoreEmulator(db, 'localhost', 8080);
         }
         
-        // Connect Storage emulator
-        if (!storage._host?.includes('localhost')) {
+        // Connect Storage emulator - check if already connected
+        const storageConfig = (storage as any)._location;
+        if (storageConfig && !storageConfig.host?.includes('localhost')) {
           connectStorageEmulator(storage, 'localhost', 9199);
         }
         

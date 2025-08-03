@@ -23,18 +23,30 @@ The only requirement is having Node.js & npm installed - [install with nvm](http
 Follow these steps:
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+# Step 1: Clone the repository
+git clone https://github.com/narso0/BOLTA.git
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+# Step 2: Navigate to the project directory
+cd BOLTA
 
-# Step 3: Install the necessary dependencies.
-npm i
+# Step 3: Run the setup script (recommended)
+./setup.sh
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
+# OR manually install dependencies
+npm install
+
+# Step 4: Start the development server
 npm run dev
 ```
+
+**Requirements:**
+- Node.js 18.0.0 or higher
+- npm 8.0.0 or higher
+
+**Troubleshooting:**
+- If you get `vite: not found` error, make sure dependencies are installed: `npm install`
+- If you see Firebase engine warnings, they are safe to ignore with Node.js 18+
+- For import/export errors, try deleting `node_modules` and running `npm install` again
 
 **Edit a file directly in GitHub**
 

@@ -37,7 +37,7 @@ import {
   HelpCircle
 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
-import { useMobile } from '@/hooks/use-mobile';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 interface User {
   name: string;
@@ -387,7 +387,7 @@ const Navigation = ({
   user, 
   onProfileClick 
 }: NavigationProps) => {
-  const isMobile = useMobile();
+  const isMobile = useIsMobile();
 
   const handleTabChange = useCallback((tab: string) => {
     onTabChange(tab);

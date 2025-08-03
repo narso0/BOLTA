@@ -4,6 +4,7 @@ import {
   getAuth, 
   Auth, 
   GoogleAuthProvider,
+  FacebookAuthProvider,
   connectAuthEmulator
 } from 'firebase/auth';
 import { 
@@ -91,6 +92,9 @@ try {
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.addScope('profile');
 googleProvider.addScope('email');
+
+export const facebookProvider = new FacebookAuthProvider();
+facebookProvider.addScope('email');
 
 // Connection test function
 export const checkFirebaseConnection = async (): Promise<boolean> => {

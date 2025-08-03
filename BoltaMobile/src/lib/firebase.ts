@@ -4,6 +4,7 @@ import {
   getAuth, 
   Auth, 
   GoogleAuthProvider,
+  FacebookAuthProvider,
   initializeAuth,
   getReactNativePersistence
 } from 'firebase/auth';
@@ -93,6 +94,9 @@ try {
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.addScope('profile');
 googleProvider.addScope('email');
+
+export const facebookProvider = new FacebookAuthProvider();
+facebookProvider.addScope('email');
 
 // Connection test function
 export const checkFirebaseConnection = async (): Promise<boolean> => {

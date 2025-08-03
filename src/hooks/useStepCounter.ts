@@ -118,7 +118,7 @@ export const useStepCounter = () => {
     return null;
   }, []);
 
-  // Enhanced motion detection with smoothing
+    // Enhanced motion detection with smoothing
   const processMotionData = useCallback((acceleration: DeviceAcceleration) => {
     const { x = 0, y = 0, z = 0 } = acceleration;
     const magnitude = Math.sqrt(x * x + y * y + z * z);

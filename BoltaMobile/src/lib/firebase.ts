@@ -1,21 +1,21 @@
-// Firebase configuration for web app
+// Firebase configuration for mobile app
 import { initializeApp, FirebaseApp } from 'firebase/app';
 import { 
   getAuth, 
   Auth, 
   GoogleAuthProvider,
-  connectAuthEmulator
+  initializeAuth,
+  getReactNativePersistence
 } from 'firebase/auth';
 import { 
   getFirestore, 
-  Firestore,
-  connectFirestoreEmulator
+  Firestore 
 } from 'firebase/firestore';
 import { 
   getStorage, 
-  FirebaseStorage,
-  connectStorageEmulator
+  FirebaseStorage 
 } from 'firebase/storage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Firebase configuration interface
 interface FirebaseConfig {
@@ -28,7 +28,7 @@ interface FirebaseConfig {
   measurementId?: string;
 }
 
-// Firebase configuration - using same config as mobile app
+// Firebase configuration - using same config as web app
 const firebaseConfig: FirebaseConfig = {
   apiKey: "AIzaSyBGNllbI87OaBWbj4TLbsispili9_JHxMU",
   authDomain: "bolta-12e5a.firebaseapp.com",
@@ -71,8 +71,10 @@ try {
   // Initialize Firebase app
   app = initializeApp(firebaseConfig);
   
-  // Initialize Auth (web version - no AsyncStorage)
-  auth = getAuth(app);
+  // Initialize Auth with AsyncStorage persistence for React Native
+  auth = initializeAuth(app, {
+    persistence: getReactNativePersistence(AsyncStorage)
+  });
   
   // Initialize Firestore
   db = getFirestore(app);
@@ -80,7 +82,7 @@ try {
   // Initialize Storage
   storage = getStorage(app);
 
-  console.log('Firebase initialized successfully for web');
+  console.log('Firebase initialized successfully for mobile');
   
 } catch (error) {
   console.error('Firebase initialization error:', error);
@@ -96,7 +98,6 @@ googleProvider.addScope('email');
 export const checkFirebaseConnection = async (): Promise<boolean> => {
   try {
     // Simple test to check if Firebase is accessible
-    // Try to access the app instance
     return !!app && !!auth && !!db;
   } catch (error) {
     console.error('Firebase connection test failed:', error);

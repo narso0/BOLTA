@@ -1,47 +1,38 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useToast } from '@/hooks/use-toast';
-
-// Enhanced TypeScript interfaces
-interface StepData {
-  steps: number;
-  coins: number;
-  distance: number;
-  calories: number;
-  lastUpdated: Date;
-}
-
-interface MotionData {
-  x: number;
-  y: number;
-  z: number;
-  magnitude: number;
-  timestamp: number;
-}
-
-interface SamsungHealthAPI {
-  getStepCountData: () => Promise<{ dailySteps: number }>;
-}
-
-interface WebAPIs {
-  HealthService?: SamsungHealthAPI;
-}
+import { DeviceMotion } from 'expo-sensors';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Location from 'expo-location';
+import { StepData, SensorData } from '../types';
 
 // Constants
 const STEP_DETECTION_THRESHOLD = { MIN: 8, MAX: 20 };
 const MIN_STEP_INTERVAL = 300; // milliseconds
 const STEP_LENGTH_METERS = 0.7;
 const STEPS_PER_COIN = 1000;
-const CALORIES_PER_STEP = 0.04; // Average calories burned per step
-const SAMSUNG_HEALTH_SYNC_INTERVAL = 10000; // 10 seconds
+const CALORIES_PER_STEP = 0.04;
 const STORAGE_KEY = 'bolta_step_data';
 
-export const useStepCounter = () => {
+interface UseStepCounterReturn {
+  stepData: StepData;
+  isTracking: boolean;
+  permissionGranted: boolean;
+  error: string | null;
+  isInitialized: boolean;
+  requestPermissions: () => Promise<void>;
+  startTracking: () => Promise<void>;
+  stopTracking: () => void;
+  addSteps: (steps: number) => void;
+  resetDaily: () => void;
+}
+
+export const useStepCounter = (): UseStepCounterReturn => {
   const [stepData, setStepData] = useState<StepData>({
     steps: 0,
     coins: 0,
     distance: 0,
     calories: 0,
-    lastUpdated: new Date()
+    lastUpdated: new Date(),
+    source: 'device'
   });
   
   const [isTracking, setIsTracking] = useState(false);
@@ -51,10 +42,8 @@ export const useStepCounter = () => {
   
   const lastStepCount = useRef(0);
   const lastMotionTime = useRef(0);
-  const motionBuffer = useRef<MotionData[]>([]);
-  const syncIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  
-  const { toast } = useToast();
+  const motionBuffer = useRef<SensorData[]>([]);
+  const subscription = useRef<any>(null);
 
   // Utility functions
   const calculateDistance = useCallback((steps: number): number => {
@@ -70,295 +59,227 @@ export const useStepCounter = () => {
   }, []);
 
   // Load persisted data
-  const loadPersistedData = useCallback((): StepData | null => {
+  const loadPersistedData = useCallback(async (): Promise<StepData | null> => {
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
+      const stored = await AsyncStorage.getItem(STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored);
         // Check if data is from today
         const storedDate = new Date(parsed.lastUpdated);
         const today = new Date();
-        const isToday = storedDate.toDateString() === today.toDateString();
         
-        if (isToday) {
+        if (storedDate.toDateString() === today.toDateString()) {
           return {
             ...parsed,
             lastUpdated: new Date(parsed.lastUpdated)
           };
         }
       }
+      return null;
     } catch (error) {
-      console.warn('Failed to load persisted step data:', error);
+      console.error('Failed to load persisted step data:', error);
+      return null;
     }
-    return null;
   }, []);
 
-  // Persist data
-  const persistData = useCallback((data: StepData) => {
+  // Save data to storage
+  const saveData = useCallback(async (data: StepData) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (error) {
-      console.warn('Failed to persist step data:', error);
+      console.error('Failed to save step data:', error);
     }
   }, []);
 
-  // Enhanced Samsung Health integration
-  const requestSamsungHealth = useCallback(async (): Promise<number | null> => {
-    try {
-      const win = window as Window & { webapis?: WebAPIs };
-      if (win.webapis?.HealthService) {
-        const healthService = win.webapis.HealthService;
-        const result = await healthService.getStepCountData();
-        return result.dailySteps || 0;
-      }
-    } catch (error) {
-      console.log('Samsung Health not available:', error);
-      setError('Samsung Health integration failed');
-    }
-    return null;
-  }, []);
+  // Update step data
+  const updateStepData = useCallback((newSteps: number, source: StepData['source'] = 'device') => {
+    const now = new Date();
+    const distance = calculateDistance(newSteps);
+    const coins = calculateCoins(newSteps);
+    const calories = calculateCalories(newSteps);
 
-  // Enhanced motion detection with smoothing
-  const processMotionData = useCallback((acceleration: DeviceAcceleration) => {
-    const { x = 0, y = 0, z = 0 } = acceleration;
+    const newData: StepData = {
+      steps: newSteps,
+      coins,
+      distance,
+      calories,
+      lastUpdated: now,
+      source
+    };
+
+    setStepData(newData);
+    saveData(newData);
+  }, [calculateDistance, calculateCoins, calculateCalories, saveData]);
+
+  // Step detection algorithm
+  const detectStep = useCallback((sensorData: SensorData) => {
+    const { x, y, z, timestamp } = sensorData;
     const magnitude = Math.sqrt(x * x + y * y + z * z);
-    const timestamp = Date.now();
-
-    // Add to motion buffer for smoothing
-    motionBuffer.current.push({ x, y, z, magnitude, timestamp });
     
-    // Keep only last 10 readings (for smoothing)
+    // Add to motion buffer
+    motionBuffer.current.push({ x, y, z, timestamp });
+    
+    // Keep only last 10 readings
     if (motionBuffer.current.length > 10) {
       motionBuffer.current.shift();
     }
-
-    // Calculate smoothed magnitude
-    const smoothedMagnitude = motionBuffer.current.reduce((sum, data) => sum + data.magnitude, 0) / motionBuffer.current.length;
     
-    // Detect step pattern with improved algorithm
-    if (
-      smoothedMagnitude > STEP_DETECTION_THRESHOLD.MIN && 
-      smoothedMagnitude < STEP_DETECTION_THRESHOLD.MAX &&
-      timestamp - lastMotionTime.current > MIN_STEP_INTERVAL
-    ) {
-      lastMotionTime.current = timestamp;
-      incrementSteps();
+    // Check for step pattern
+    if (motionBuffer.current.length >= 3) {
+      const recent = motionBuffer.current.slice(-3);
+      const magnitudes = recent.map(r => Math.sqrt(r.x * r.x + r.y * r.y + r.z * r.z));
+      
+      // Simple peak detection
+      if (magnitudes[1] > magnitudes[0] && 
+          magnitudes[1] > magnitudes[2] && 
+          magnitudes[1] > STEP_DETECTION_THRESHOLD.MIN &&
+          magnitudes[1] < STEP_DETECTION_THRESHOLD.MAX &&
+          timestamp - lastMotionTime.current > MIN_STEP_INTERVAL) {
+        
+        lastMotionTime.current = timestamp;
+        return true;
+      }
     }
+    
+    return false;
   }, []);
 
-  const handleDeviceMotion = useCallback((event: DeviceMotionEvent) => {
-    if (!isTracking || !event.accelerationIncludingGravity) return;
-    
-    try {
-      processMotionData(event.accelerationIncludingGravity);
-    } catch (error) {
-      console.error('Motion processing error:', error);
-      setError('Motion detection failed');
-    }
-  }, [isTracking, processMotionData]);
-
-  const incrementSteps = useCallback(() => {
-    setStepData(prev => {
-      const newSteps = prev.steps + 1;
-      const newCoins = calculateCoins(newSteps);
-      const newDistance = calculateDistance(newSteps);
-      const newCalories = calculateCalories(newSteps);
-      const newData: StepData = {
-        steps: newSteps,
-        coins: newCoins,
-        distance: newDistance,
-        calories: newCalories,
-        lastUpdated: new Date()
-      };
-      
-      // Show coin notification when earning new coin
-      if (newCoins > prev.coins) {
-        const coinsEarned = newCoins - prev.coins;
-        toast({
-          title: "🎉 Coin Earned!",
-          description: `You've earned ${coinsEarned} Boltacoin${coinsEarned > 1 ? 's' : ''}!`,
-          duration: 3000,
-        });
-      }
-      
-      // Persist data
-      persistData(newData);
-      
-      return newData;
-    });
-  }, [calculateCoins, calculateDistance, calculateCalories, toast, persistData]);
-
-  const updateStepsFromExternal = useCallback((steps: number) => {
-    setStepData(prev => {
-      const newCoins = calculateCoins(steps);
-      const newDistance = calculateDistance(steps);
-      const newCalories = calculateCalories(steps);
-      const newData: StepData = {
-        steps,
-        coins: newCoins,
-        distance: newDistance,
-        calories: newCalories,
-        lastUpdated: new Date()
-      };
-      
-      // Show coin notification for significant increases
-      if (newCoins > prev.coins) {
-        const coinsEarned = newCoins - prev.coins;
-        toast({
-          title: "🎉 Progress Synced!",
-          description: `Earned ${coinsEarned} Boltacoin${coinsEarned > 1 ? 's' : ''} from your activity!`,
-          duration: 3000,
-        });
-      }
-      
-      persistData(newData);
-      return newData;
-    });
-  }, [calculateCoins, calculateDistance, calculateCalories, toast, persistData]);
-
-  const requestPermission = useCallback(async (): Promise<boolean> => {
+  // Request permissions
+  const requestPermissions = useCallback(async () => {
     try {
       setError(null);
       
-      // First try Samsung Health
-      const samsungSteps = await requestSamsungHealth();
-      if (samsungSteps !== null) {
-        updateStepsFromExternal(samsungSteps);
-        setPermissionGranted(true);
-        setIsTracking(true);
-        return true;
+      // Request motion sensor permission
+      const motionPermission = await DeviceMotion.requestPermissionsAsync();
+      if (!motionPermission.granted) {
+        throw new Error('Motion sensor permission denied');
       }
 
-      // Fallback to device motion
-      if (typeof DeviceMotionEvent !== 'undefined') {
-        const DeviceMotionEventAny = DeviceMotionEvent as any;
-        if (typeof DeviceMotionEventAny.requestPermission === 'function') {
-          const permission = await DeviceMotionEventAny.requestPermission();
-          if (permission === 'granted') {
-            setPermissionGranted(true);
-            setIsTracking(true);
-            return true;
-          } else {
-            setError('Motion permission denied');
-            return false;
-          }
-        } else {
-          // Android or older browsers - permission not required
-          setPermissionGranted(true);
-          setIsTracking(true);
-          return true;
-        }
-      } else {
-        setError('Device motion not supported');
-        return false;
+      // Request location permission (optional, for better accuracy)
+      try {
+        await Location.requestForegroundPermissionsAsync();
+      } catch (locationError) {
+        console.warn('Location permission not granted, continuing without location');
       }
-    } catch (error) {
-      console.error('Permission request failed:', error);
-      setError('Failed to request permissions');
-      return false;
-    }
-  }, [requestSamsungHealth, updateStepsFromExternal]);
 
-  const startTracking = useCallback(async () => {
-    if (!isInitialized) return;
-    
-    const success = await requestPermission();
-    if (!success) {
-      // Set demo data for non-mobile or when permissions fail
-      setStepData(prev => ({
-        ...prev,
-        steps: 1250,
-        coins: 1,
-        distance: 0.88,
-        calories: 50,
-        lastUpdated: new Date()
-      }));
-    }
-  }, [isInitialized, requestPermission]);
-
-  const stopTracking = useCallback(() => {
-    setIsTracking(false);
-    if (syncIntervalRef.current) {
-      clearInterval(syncIntervalRef.current);
-      syncIntervalRef.current = null;
+      setPermissionGranted(true);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Permission request failed';
+      setError(errorMessage);
+      setPermissionGranted(false);
     }
   }, []);
 
-  const resetDailyData = useCallback(() => {
-    const newData: StepData = {
-      steps: 0,
-      coins: 0,
-      distance: 0,
-      calories: 0,
-      lastUpdated: new Date()
-    };
-    setStepData(newData);
-    persistData(newData);
-  }, [persistData]);
-
-  // Initialize
-  useEffect(() => {
-    const persistedData = loadPersistedData();
-    if (persistedData) {
-      setStepData(persistedData);
+  // Start step tracking
+  const startTracking = useCallback(async () => {
+    if (!permissionGranted) {
+      await requestPermissions();
+      if (!permissionGranted) return;
     }
-    setIsInitialized(true);
+
+    try {
+      setError(null);
+      
+      // Check if DeviceMotion is available
+      const isAvailable = await DeviceMotion.isAvailableAsync();
+      if (!isAvailable) {
+        throw new Error('Device motion sensor not available');
+      }
+
+      // Set update interval (100ms = 10Hz)
+      DeviceMotion.setUpdateInterval(100);
+
+      // Start listening to motion events
+      subscription.current = DeviceMotion.addListener((motionData) => {
+        if (motionData && motionData.acceleration) {
+          const sensorData: SensorData = {
+            x: motionData.acceleration.x || 0,
+            y: motionData.acceleration.y || 0,
+            z: motionData.acceleration.z || 0,
+            timestamp: Date.now()
+          };
+
+          if (detectStep(sensorData)) {
+            const newStepCount = stepData.steps + 1;
+            updateStepData(newStepCount);
+          }
+        }
+      });
+
+      setIsTracking(true);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to start tracking';
+      setError(errorMessage);
+      setIsTracking(false);
+    }
+  }, [permissionGranted, requestPermissions, stepData.steps, detectStep, updateStepData]);
+
+  // Stop tracking
+  const stopTracking = useCallback(() => {
+    if (subscription.current) {
+      subscription.current.remove();
+      subscription.current = null;
+    }
+    setIsTracking(false);
+  }, []);
+
+  // Add steps manually
+  const addSteps = useCallback((steps: number) => {
+    const newStepCount = stepData.steps + steps;
+    updateStepData(newStepCount, 'manual');
+  }, [stepData.steps, updateStepData]);
+
+  // Reset daily data
+  const resetDaily = useCallback(() => {
+    updateStepData(0);
+  }, [updateStepData]);
+
+  // Initialize hook
+  useEffect(() => {
+    const initialize = async () => {
+      try {
+        // Load persisted data
+        const persistedData = await loadPersistedData();
+        if (persistedData) {
+          setStepData(persistedData);
+        }
+
+        // Check permissions
+        const motionPermission = await DeviceMotion.getPermissionsAsync();
+        setPermissionGranted(motionPermission.granted);
+
+        setIsInitialized(true);
+      } catch (err) {
+        console.error('Failed to initialize step counter:', err);
+        setError('Initialization failed');
+        setIsInitialized(true);
+      }
+    };
+
+    initialize();
   }, [loadPersistedData]);
 
-  // Start tracking when initialized
+  // Cleanup on unmount
   useEffect(() => {
-    if (isInitialized) {
-      startTracking();
-    }
-  }, [isInitialized, startTracking]);
-
-  // Device motion event listener
-  useEffect(() => {
-    if (isTracking && permissionGranted) {
-      window.addEventListener('devicemotion', handleDeviceMotion);
-      
-      return () => {
-        window.removeEventListener('devicemotion', handleDeviceMotion);
-      };
-    }
-  }, [isTracking, permissionGranted, handleDeviceMotion]);
-
-  // Samsung Health sync interval
-  useEffect(() => {
-    if (!isTracking) return;
-    
-    syncIntervalRef.current = setInterval(async () => {
-      const samsungSteps = await requestSamsungHealth();
-      if (samsungSteps !== null && samsungSteps !== lastStepCount.current) {
-        lastStepCount.current = samsungSteps;
-        updateStepsFromExternal(samsungSteps);
-      }
-    }, SAMSUNG_HEALTH_SYNC_INTERVAL);
-
     return () => {
-      if (syncIntervalRef.current) {
-        clearInterval(syncIntervalRef.current);
-      }
+      stopTracking();
     };
-  }, [isTracking, requestSamsungHealth, updateStepsFromExternal]);
+  }, [stopTracking]);
 
-  // Daily reset check
+  // Auto-reset at midnight
   useEffect(() => {
-    const checkDailyReset = () => {
-      const lastUpdate = stepData.lastUpdated;
+    const checkMidnight = () => {
       const now = new Date();
+      const lastUpdate = new Date(stepData.lastUpdated);
       
-      if (lastUpdate.toDateString() !== now.toDateString()) {
-        resetDailyData();
+      if (now.toDateString() !== lastUpdate.toDateString()) {
+        resetDaily();
       }
     };
 
-    // Check on mount and every hour
-    checkDailyReset();
-    const interval = setInterval(checkDailyReset, 60 * 60 * 1000);
-
+    const interval = setInterval(checkMidnight, 60000); // Check every minute
     return () => clearInterval(interval);
-  }, [stepData.lastUpdated, resetDailyData]);
+  }, [stepData.lastUpdated, resetDaily]);
 
   return {
     stepData,
@@ -366,9 +287,10 @@ export const useStepCounter = () => {
     permissionGranted,
     error,
     isInitialized,
-    requestPermission,
+    requestPermissions,
     startTracking,
     stopTracking,
-    resetDailyData
-  } as const;
+    addSteps,
+    resetDaily
+  };
 };

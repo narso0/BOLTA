@@ -1,7 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { DeviceMotion } from 'expo-sensors';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Location from 'expo-location';
 import { StepData, SensorData } from '../types';
 
 // Constants
@@ -32,254 +29,213 @@ export const useStepCounter = (): UseStepCounterReturn => {
     distance: 0,
     calories: 0,
     lastUpdated: new Date(),
-    source: 'device'
+    source: 'web'
   });
   
   const [isTracking, setIsTracking] = useState(false);
-  const [permissionGranted, setPermissionGranted] = useState(false);
+  const [permissionGranted, setPermissionGranted] = useState(true); // Web doesn't need sensor permissions
   const [error, setError] = useState<string | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
   
-  const lastStepCount = useRef(0);
-  const lastMotionTime = useRef(0);
-  const motionBuffer = useRef<SensorData[]>([]);
-  const subscription = useRef<any>(null);
+  const simulationInterval = useRef<NodeJS.Timeout | null>(null);
 
   // Utility functions
   const calculateDistance = useCallback((steps: number): number => {
     return Math.round((steps * STEP_LENGTH_METERS) / 1000 * 100) / 100; // km with 2 decimal places
   }, []);
 
+  const calculateCalories = useCallback((steps: number): number => {
+    return Math.round(steps * CALORIES_PER_STEP * 100) / 100;
+  }, []);
+
   const calculateCoins = useCallback((steps: number): number => {
     return Math.floor(steps / STEPS_PER_COIN);
   }, []);
 
-  const calculateCalories = useCallback((steps: number): number => {
-    return Math.round(steps * CALORIES_PER_STEP);
-  }, []);
-
-  // Load persisted data
-  const loadPersistedData = useCallback(async (): Promise<StepData | null> => {
+  // Storage functions for web (using localStorage instead of AsyncStorage)
+  const saveStepData = useCallback(async (data: StepData): Promise<void> => {
     try {
-      const stored = await AsyncStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        // Check if data is from today
-        const storedDate = new Date(parsed.lastUpdated);
-        const today = new Date();
-        
-        if (storedDate.toDateString() === today.toDateString()) {
-          return {
-            ...parsed,
-            lastUpdated: new Date(parsed.lastUpdated)
-          };
-        }
-      }
-      return null;
-    } catch (error) {
-      console.error('Failed to load persisted step data:', error);
-      return null;
-    }
-  }, []);
-
-  // Save data to storage
-  const saveData = useCallback(async (data: StepData) => {
-    try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      const dataToSave = {
+        ...data,
+        lastUpdated: data.lastUpdated.toISOString()
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(dataToSave));
     } catch (error) {
       console.error('Failed to save step data:', error);
     }
   }, []);
 
-  // Update step data
-  const updateStepData = useCallback((newSteps: number, source: StepData['source'] = 'device') => {
+  const loadStepData = useCallback(async (): Promise<StepData | null> => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          ...parsed,
+          lastUpdated: new Date(parsed.lastUpdated)
+        };
+      }
+    } catch (error) {
+      console.error('Failed to load step data:', error);
+    }
+    return null;
+  }, []);
+
+  // Check if it's a new day and reset if needed
+  const checkAndResetDaily = useCallback((data: StepData): StepData => {
     const now = new Date();
-    const distance = calculateDistance(newSteps);
-    const coins = calculateCoins(newSteps);
-    const calories = calculateCalories(newSteps);
-
-    const newData: StepData = {
-      steps: newSteps,
-      coins,
-      distance,
-      calories,
-      lastUpdated: now,
-      source
-    };
-
-    setStepData(newData);
-    saveData(newData);
-  }, [calculateDistance, calculateCoins, calculateCalories, saveData]);
-
-  // Step detection algorithm
-  const detectStep = useCallback((sensorData: SensorData) => {
-    const { x, y, z, timestamp } = sensorData;
-    const magnitude = Math.sqrt(x * x + y * y + z * z);
+    const lastUpdate = new Date(data.lastUpdated);
     
-    // Add to motion buffer
-    motionBuffer.current.push({ x, y, z, timestamp });
+    // Check if it's a new day (different date)
+    const isNewDay = now.toDateString() !== lastUpdate.toDateString();
     
-    // Keep only last 10 readings
-    if (motionBuffer.current.length > 10) {
-      motionBuffer.current.shift();
+    if (isNewDay) {
+      console.log('New day detected, resetting step count');
+      return {
+        steps: 0,
+        coins: data.coins, // Keep accumulated coins
+        distance: 0,
+        calories: 0,
+        lastUpdated: now,
+        source: data.source
+      };
     }
     
-    // Check for step pattern
-    if (motionBuffer.current.length >= 3) {
-      const recent = motionBuffer.current.slice(-3);
-      const magnitudes = recent.map(r => Math.sqrt(r.x * r.x + r.y * r.y + r.z * r.z));
-      
-      // Simple peak detection
-      if (magnitudes[1] > magnitudes[0] && 
-          magnitudes[1] > magnitudes[2] && 
-          magnitudes[1] > STEP_DETECTION_THRESHOLD.MIN &&
-          magnitudes[1] < STEP_DETECTION_THRESHOLD.MAX &&
-          timestamp - lastMotionTime.current > MIN_STEP_INTERVAL) {
-        
-        lastMotionTime.current = timestamp;
-        return true;
-      }
-    }
-    
-    return false;
+    return data;
   }, []);
 
-  // Request permissions
-  const requestPermissions = useCallback(async () => {
-    try {
-      setError(null);
+  // Update step data with new steps
+  const updateStepData = useCallback((newSteps: number, source: StepData['source'] = 'web') => {
+    setStepData(prevData => {
+      const totalSteps = prevData.steps + newSteps;
+      const distance = calculateDistance(totalSteps);
+      const calories = calculateCalories(totalSteps);
+      const coins = calculateCoins(totalSteps);
       
-      // Request motion sensor permission
-      const motionPermission = await DeviceMotion.requestPermissionsAsync();
-      if (!motionPermission.granted) {
-        throw new Error('Motion sensor permission denied');
-      }
+      const newData: StepData = {
+        steps: totalSteps,
+        coins: prevData.coins + (coins - calculateCoins(prevData.steps)), // Only add new coins
+        distance,
+        calories,
+        lastUpdated: new Date(),
+        source
+      };
+      
+      // Save to localStorage
+      saveStepData(newData);
+      
+      return newData;
+    });
+  }, [calculateDistance, calculateCalories, calculateCoins, saveStepData]);
 
-      // Request location permission (optional, for better accuracy)
-      try {
-        await Location.requestForegroundPermissionsAsync();
-      } catch (locationError) {
-        console.warn('Location permission not granted, continuing without location');
-      }
+  // Manual step addition (for web interface)
+  const addSteps = useCallback((steps: number) => {
+    updateStepData(steps, 'manual');
+  }, [updateStepData]);
 
-      setPermissionGranted(true);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Permission request failed';
-      setError(errorMessage);
-      setPermissionGranted(false);
+  // Simulate step tracking (for demo purposes on web)
+  const startSimulation = useCallback(() => {
+    if (simulationInterval.current) return;
+    
+    simulationInterval.current = setInterval(() => {
+      // Simulate 1-3 steps every few seconds for demo
+      const randomSteps = Math.floor(Math.random() * 3) + 1;
+      updateStepData(randomSteps, 'simulated');
+    }, 5000); // Every 5 seconds
+  }, [updateStepData]);
+
+  const stopSimulation = useCallback(() => {
+    if (simulationInterval.current) {
+      clearInterval(simulationInterval.current);
+      simulationInterval.current = null;
     }
   }, []);
 
-  // Start step tracking
-  const startTracking = useCallback(async () => {
-    if (!permissionGranted) {
-      await requestPermissions();
-      if (!permissionGranted) return;
-    }
+  // Web doesn't need motion permissions
+  const requestPermissions = useCallback(async (): Promise<void> => {
+    setPermissionGranted(true);
+    setError(null);
+  }, []);
 
+  // Start tracking (web version uses simulation)
+  const startTracking = useCallback(async (): Promise<void> => {
     try {
       setError(null);
-      
-      // Check if DeviceMotion is available
-      const isAvailable = await DeviceMotion.isAvailableAsync();
-      if (!isAvailable) {
-        throw new Error('Device motion sensor not available');
-      }
-
-      // Set update interval (100ms = 10Hz)
-      DeviceMotion.setUpdateInterval(100);
-
-      // Start listening to motion events
-      subscription.current = DeviceMotion.addListener((motionData) => {
-        if (motionData && motionData.acceleration) {
-          const sensorData: SensorData = {
-            x: motionData.acceleration.x || 0,
-            y: motionData.acceleration.y || 0,
-            z: motionData.acceleration.z || 0,
-            timestamp: Date.now()
-          };
-
-          if (detectStep(sensorData)) {
-            const newStepCount = stepData.steps + 1;
-            updateStepData(newStepCount);
-          }
-        }
-      });
-
       setIsTracking(true);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to start tracking';
-      setError(errorMessage);
+      
+      // Start simulation for demo purposes
+      startSimulation();
+      
+      console.log('Step tracking started (web simulation)');
+    } catch (error) {
+      console.error('Failed to start tracking:', error);
+      setError('Failed to start step tracking');
       setIsTracking(false);
     }
-  }, [permissionGranted, requestPermissions, stepData.steps, detectStep, updateStepData]);
+  }, [startSimulation]);
 
   // Stop tracking
   const stopTracking = useCallback(() => {
-    if (subscription.current) {
-      subscription.current.remove();
-      subscription.current = null;
-    }
     setIsTracking(false);
-  }, []);
-
-  // Add steps manually
-  const addSteps = useCallback((steps: number) => {
-    const newStepCount = stepData.steps + steps;
-    updateStepData(newStepCount, 'manual');
-  }, [stepData.steps, updateStepData]);
+    stopSimulation();
+    console.log('Step tracking stopped');
+  }, [stopSimulation]);
 
   // Reset daily data
   const resetDaily = useCallback(() => {
-    updateStepData(0);
-  }, [updateStepData]);
+    const resetData: StepData = {
+      steps: 0,
+      coins: stepData.coins, // Keep accumulated coins
+      distance: 0,
+      calories: 0,
+      lastUpdated: new Date(),
+      source: 'web'
+    };
+    
+    setStepData(resetData);
+    saveStepData(resetData);
+  }, [stepData.coins, saveStepData]);
 
   // Initialize hook
   useEffect(() => {
-    const initialize = async () => {
+    const initializeStepCounter = async () => {
       try {
-        // Load persisted data
-        const persistedData = await loadPersistedData();
-        if (persistedData) {
-          setStepData(persistedData);
+        setError(null);
+        
+        // Load saved data
+        const savedData = await loadStepData();
+        
+        if (savedData) {
+          // Check if we need to reset for new day
+          const checkedData = checkAndResetDaily(savedData);
+          setStepData(checkedData);
+          
+          // Save if data was reset
+          if (checkedData !== savedData) {
+            await saveStepData(checkedData);
+          }
         }
-
-        // Check permissions
-        const motionPermission = await DeviceMotion.getPermissionsAsync();
-        setPermissionGranted(motionPermission.granted);
-
+        
+        setPermissionGranted(true);
         setIsInitialized(true);
-      } catch (err) {
-        console.error('Failed to initialize step counter:', err);
-        setError('Initialization failed');
+        
+        console.log('Step counter initialized for web');
+      } catch (error) {
+        console.error('Failed to initialize step counter:', error);
+        setError('Failed to initialize step tracking');
         setIsInitialized(true);
       }
     };
 
-    initialize();
-  }, [loadPersistedData]);
+    initializeStepCounter();
+  }, [loadStepData, checkAndResetDaily, saveStepData]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopTracking();
+      stopSimulation();
     };
-  }, [stopTracking]);
-
-  // Auto-reset at midnight
-  useEffect(() => {
-    const checkMidnight = () => {
-      const now = new Date();
-      const lastUpdate = new Date(stepData.lastUpdated);
-      
-      if (now.toDateString() !== lastUpdate.toDateString()) {
-        resetDaily();
-      }
-    };
-
-    const interval = setInterval(checkMidnight, 60000); // Check every minute
-    return () => clearInterval(interval);
-  }, [stepData.lastUpdated, resetDaily]);
+  }, [stopSimulation]);
 
   return {
     stepData,

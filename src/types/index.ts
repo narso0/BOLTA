@@ -47,7 +47,7 @@ export interface StepData {
   distance: number;
   calories: number;
   lastUpdated: Date;
-  source: 'manual' | 'device' | 'health_kit' | 'google_fit';
+  source: 'manual' | 'device' | 'health_kit' | 'google_fit' | 'web' | 'simulated';
 }
 
 export interface DailyStepRecord extends StepData {
